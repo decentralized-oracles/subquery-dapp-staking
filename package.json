@@ -3,6 +3,7 @@
   "version": "0.0.4",
   "description": "This SubQuery project can be use as a starting point for Astar network",
   "main": "dist/index.js",
+  "type": "module",
   "scripts": {
     "build": "subql build",
     "prepack": "rm -rf dist && npm build",
