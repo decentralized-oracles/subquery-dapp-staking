@@ -1,5 +1,5 @@
 {
-  "name": "Astar-dApps-Staking",
+  "name": "subquery-dapp-staking",
   "version": "0.0.4",
   "description": "This SubQuery project can be use as a starting point for Astar network",
   "main": "dist/index.js",
@@ -29,6 +29,6 @@
     "@subql/substrate-wasm-processor": "latest"
   },
   "exports": {
-    "chaintypes": "src/chaintypes.ts",
+    "chaintypes": "src/chaintypes.ts"
   }
 }
