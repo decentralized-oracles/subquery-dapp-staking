@@ -1,52 +1,61 @@
 import { SubstrateEvent } from "@subql/types";
 import { Balance } from "@polkadot/types/interfaces";
-import { AnyJson } from "@polkadot/types/types";
-import { DApp, Account, Stake, Reward } from "../types";
+import { Codec } from "@polkadot/types/types";
+import { DApp, Account, Stake, StakeEvent, Reward } from "../types";
 
-function getDAppId(smartContract: AnyJson): string {
-	let evm = smartContract['evm'];
-  	if (evm) {
-    	return evm;
-  	}
-  	let wasm = smartContract['wasm'];
-  	if (wasm) {
-    	return wasm;
-  	}
-  	return null;
+function getDAppId(smartContract: Codec): string {
+    const addressJson = JSON.parse(smartContract.toString());
+    return addressJson.evm ? addressJson.evm : addressJson.wasm;
 }
 
-async function getDApp(dAppId: string): Promise<DApp> {
-   let dApp = await DApp.get(dAppId);
+async function saveDApp(dAppId: string, accountId: string, registered: boolean): Promise<void> {
+    let dApp = await DApp.get(dAppId);
     if (!dApp) {
-		dApp = new DApp(dAppId, false);
+        dApp = new DApp(dAppId);
     }
-    return dApp;
+    dApp.registered = registered;
+    dApp.accountId  = accountId;
+    await dApp.save();
 }
 
-async function getAccount(accountId: string): Promise<Account> {
-    let account = await Account.get(accountId);
+async function ensureDApp(dAppId: string): Promise<void> {
+    const dApp = await DApp.get(dAppId);
+    if (!dApp) {
+        const dApp = new DApp(dAppId);
+        await dApp.save();
+    }
+}
+
+async function ensureAccount(accountId: string): Promise<void> {
+    const account = await Account.get(accountId);
     if (!account) {
-		account = new Account(accountId);
+        const account = new Account(accountId);
+        return account.save();
     }
-  return account;
 }
 
-async function getStake(dAppId: string, accountId: string): Promise<Stake> {
-    let stakeId = `${dAppId}-${accountId}`;
+async function addStake(dAppId: string, accountId: string, amount: bigint): Promise<void> {
+    const stakeId = `${dAppId}-${accountId}`;
     let stake = await Stake.get(stakeId);
-    if (!stake) {
-		stake = new Stake(stakeId, accountId, dAppId, BigInt(0));
+    if (stake) {
+        stake.totalStake += amount;
+    } else {
+        stake = new Stake(stakeId, accountId, dAppId, amount);
     }
-  return stake;
+
+    // save the updated stake
+    return stake.save();
 }
 
-async function getReward(dAppId: string, accountId: string): Promise<Reward> {
-    let rewardId = `${dAppId}-${accountId}`;
+async function addReward(dAppId: string, accountId: string, amount: bigint): Promise<void> {
+    const rewardId = `${dAppId}-${accountId}`;
     let reward = await Reward.get(rewardId);
-    if (!reward) {
-		reward = new Reward(rewardId, accountId, dAppId, BigInt(0));
+    if (reward) {
+        reward.totalReward += amount;
+    } else {
+        reward = new Reward(rewardId, accountId, dAppId, amount);
     }
-  return reward;
+    return reward.save();
 }
 
 export async function registerContract(event: SubstrateEvent): Promise<void> {
@@ -56,11 +65,11 @@ export async function registerContract(event: SubstrateEvent): Promise<void> {
         },
     } = event;
 
-    let dAppId = getDAppId(smartContract.toJSON());
-    let dApp = await getDApp(dAppId);
-	dApp.accountId = account.toString();
-	dApp.registered = true;
-	await dApp.save();
+    const dAppId = getDAppId(smartContract);
+    const accountId = account.toString();
+
+    await ensureAccount(accountId);
+    return saveDApp(dAppId, accountId, true);
 }
 
 
@@ -71,14 +80,15 @@ export async function unregisterContract(event: SubstrateEvent): Promise<void> {
         },
     } = event;
 
-    let dAppId = getDAppId(smartContract.toJSON());
-    let dApp = await getDApp(dAppId);
-	dApp.registered = false;
-	await dApp.save();
+    const dAppId = getDAppId(smartContract);
+    const accountId = account.toString();
+
+    await ensureAccount(accountId);
+    return saveDApp(dAppId, accountId, false);
 }
 
 
-export async function bondAndStake(event: SubstrateEvent): Promise<void> {
+export async function bondAndStake(event: SubstrateEvent): Promise<void[]> {
     const {
         event: {
             data: [account, smartContract, balanceOf],
@@ -86,22 +96,30 @@ export async function bondAndStake(event: SubstrateEvent): Promise<void> {
     } = event;
 
     const amount = (balanceOf as Balance).toBigInt();
+    const dAppId = getDAppId(smartContract);
+    const accountId = account.toString();
 
-    let dAppId = getDAppId(smartContract.toJSON());
-    let dApp = await getDApp(dAppId);
-	await dApp.save();
+    await Promise.all([
+        ensureDApp(dAppId),
+        ensureAccount(accountId),
+    ]);
 
-    let accountId = account.toString();
-    let userAccount = await getAccount(accountId);
-	await userAccount.save();
+    const stakeEvent = new StakeEvent(
+        `${event.block.block.header.number.toNumber()}-${event.idx}`,
+        accountId,
+        dAppId,
+        amount,
+        event.block.block.header.number.toBigInt()
+    );
 
-    let stake = await getStake(dAppId, accountId);
-	stake.totalStake += amount;
-	await stake.save();
+    return Promise.all([
+        stakeEvent.save(),
+        addStake(dAppId, accountId, amount)
+    ]);
 }
 
 
-export async function unbondAndUnstake(event: SubstrateEvent): Promise<void> {
+export async function unbondAndUnstake(event: SubstrateEvent): Promise<void[]> {
     const {
         event: {
             data: [account, smartContract, balanceOf],
@@ -109,22 +127,30 @@ export async function unbondAndUnstake(event: SubstrateEvent): Promise<void> {
     } = event;
 
     const amount = (balanceOf as Balance).toBigInt();
+    const dAppId = getDAppId(smartContract);
+    const accountId = account.toString();
 
-    let dAppId = getDAppId(smartContract.toJSON());
-    let dApp = await getDApp(dAppId);
-	await dApp.save();
+    await Promise.all([
+        ensureDApp(dAppId),
+        ensureAccount(accountId),
+    ]);
 
-    let accountId = account.toString();
-    let userAccount = await getAccount(accountId);
-	await userAccount.save();
+    const stakeEvent = new StakeEvent(
+        `${event.block.block.header.number.toNumber()}-${event.idx}`,
+        accountId,
+        dAppId,
+        -amount,
+        event.block.block.header.number.toBigInt()
+    );
 
-    let stake = await getStake(dAppId, accountId);
-	stake.totalStake -= amount;
-	await stake.save();
+    return Promise.all([
+        stakeEvent.save(),
+        addStake(dAppId, accountId, -amount)
+    ]);
 }
 
 
-export async function nominationTransfer(event: SubstrateEvent): Promise<void> {
+export async function nominationTransfer(event: SubstrateEvent): Promise<void[]> {
     const {
         event: {
             data: [account, originSmartContract, balanceOf, targetSmartContract],
@@ -132,24 +158,41 @@ export async function nominationTransfer(event: SubstrateEvent): Promise<void> {
     } = event;
 
     const amount = (balanceOf as Balance).toBigInt();
-    let accountId = account.toString();
+    const accountId = account.toString();
+    const originDAppId = getDAppId(originSmartContract);
+    const targetDAppId = getDAppId(targetSmartContract);
 
-    let originDAppId = getDAppId(originSmartContract.toJSON());
-    let originDApp = await getDApp(originDAppId);
-	await originDApp.save();
+    await Promise.all([
+        ensureDApp(originDAppId),
+        await ensureDApp(targetDAppId),
+        ensureAccount(accountId),
+    ]);
 
-    let originStake = await getStake(originDAppId, accountId);
-	originStake.totalStake -= amount;
-	await originStake.save();
+    // save the event
+    const originStakeEvent = new StakeEvent(
+        `${event.block.block.header.number.toNumber()}-${event.idx}-1`,
+        accountId,
+        originDAppId,
+        -amount,
+        event.block.block.header.number.toBigInt()
+    );
 
-    let targetDAppId = getDAppId(targetSmartContract.toJSON());
-    let targetDApp = await getDApp(targetDAppId);
-	await targetDApp.save();
+    const targetStakeEvent = new StakeEvent(
+        `${event.block.block.header.number.toNumber()}-${event.idx}-2`,
+        accountId,
+        targetDAppId,
+        amount,
+        event.block.block.header.number.toBigInt()
+    );
 
-    let targetStake = await getStake(targetDAppId, accountId);
-	targetStake.totalStake += amount;
-	await targetStake.save();
-
+    return Promise.all(
+        [
+            originStakeEvent.save(),
+            targetStakeEvent.save(),
+            addStake(originDAppId, accountId, -amount),
+            addStake(targetDAppId, accountId, amount)
+        ]
+    );
 }
 
 export async function reward(event: SubstrateEvent): Promise<void> {
@@ -160,16 +203,13 @@ export async function reward(event: SubstrateEvent): Promise<void> {
     } = event;
 
     const amount = (balanceOf as Balance).toBigInt();
+    const dAppId = getDAppId(smartContract);
+    const accountId = account.toString();
 
-    let dAppId = getDAppId(smartContract.toJSON());
-    let dApp = await getDApp(dAppId);
-	await dApp.save();
+    await Promise.all([
+        ensureDApp(dAppId),
+        ensureAccount(accountId),
+    ]);
 
-    let accountId = account.toString();
-    let userAccount = await getAccount(accountId);
-	await userAccount.save();
-
-    let reward = await getReward(dAppId, accountId);
-	reward.totalReward += amount;
-	await reward.save();
+    return addReward(dAppId, accountId, amount);
 }
